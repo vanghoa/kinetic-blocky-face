@@ -2,8 +2,8 @@ import p5 from 'p5';
 import * as faceapi from 'face-api.js';
 
 // block size ratio 10:20
-const RECT_W = 20;
-const RECT_H = 10;
+const RECT_W = 40;
+const RECT_H = 20;
 
 // outline color (same for all features)
 const OUTLINE_COLOR = '#8B4513';
@@ -14,13 +14,13 @@ const EYE_FILL = '#6495ED'; // steelblue
 const NOSE_FILL = '#90EE90'; // lightgreen
 
 // how much of the canvas the face box should fill (0–1)
-const BOX_FILL = 0.8;
+const BOX_FILL = 1;
 
 // load models from /models
 async function loadModels() {
     //await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
-    await faceapi.loadTinyFaceDetectorModel('/models');
-    await faceapi.loadFaceLandmarkTinyModel('/models');
+    await faceapi.loadTinyFaceDetectorModel('/kinetic-blocky-face/models');
+    await faceapi.loadFaceLandmarkTinyModel('/kinetic-blocky-face/models');
     console.log('Models loaded');
 }
 
@@ -38,11 +38,20 @@ function quantizePoints(pts) {
 // draw a set of grid cells with a given fill
 function drawCells(p, cells, fillColor) {
     p.stroke(OUTLINE_COLOR);
-    p.strokeWeight(1);
+    p.strokeWeight(3);
     p.fill(fillColor);
+
+    // 3D effect: draw extruded blocks using p5's WEBGL mode
+    // Assume p is in WEBGL mode (canvas created with WEBGL)
     cells.forEach((key) => {
         const [col, row] = key.split(',').map(Number);
-        p.rect(col * RECT_W, row * RECT_H, RECT_W, RECT_H);
+        const x = col * RECT_W - p.width / 2 + RECT_W / 2;
+        const y = row * RECT_H - p.height / 2 + RECT_H / 2;
+        const z = 0;
+        p.push();
+        p.translate(x, y, z);
+        p.box(RECT_W, RECT_H, 100); // 20 is the extrusion depth
+        p.pop();
     });
 }
 
@@ -55,9 +64,21 @@ const sketch = (p) => {
     });
 
     p.setup = async () => {
-        p.createCanvas(800, 600).parent('p5-container');
+        // Set canvas size to fit viewport ratio, but max 800x600
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        let w = 1000,
+            h = 1000;
+        const ratio = vw / vh;
+        if (w / h > ratio) {
+            w = Math.round(h * ratio);
+        } else {
+            h = Math.round(w / ratio);
+        }
+        // Use WEBGL mode for 3D
+        p.createCanvas(w, h, p.WEBGL).parent('p5-container');
         video = p.createCapture(p.VIDEO);
-        video.size(1200, 900);
+        video.size(w, h);
         video.hide();
         await loadModels();
         requestAnimationFrame(detectLoop);
@@ -71,7 +92,7 @@ const sketch = (p) => {
         const box = detections.detection.box;
         const cx = box.x + box.width / 2;
         const cy = box.y + box.height / 2;
-        const scale = Math.min(
+        const scale = Math.max(
             (p.width * BOX_FILL) / box.width,
             (p.height * BOX_FILL) / box.height
         );
@@ -95,6 +116,9 @@ const sketch = (p) => {
         const noseCells = quantizePoints(
             detections.landmarks.getNose().map(transform)
         );
+
+        // Optionally, rotate scene for better 3D effect
+        p.orbitControl();
 
         // draw each with its fill
         drawCells(p, mouthCells, MOUTH_FILL);

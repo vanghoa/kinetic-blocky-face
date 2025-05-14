@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
-        <title>Pixel FaceMesh Demo</title>
+        <title>Kineitc FaceMesh Demo</title>
         <style>
             body,
             html {
@@ -10,14 +10,16 @@
                 padding: 0;
                 background: #fdf6e3;
                 text-align: center;
+                overflow: hidden;
             }
             #p5-container {
                 display: inline-block;
-                margin-top: 20px;
             }
             canvas {
                 background: #fff8e7;
                 border: 1px solid #ccc;
+                width: 100vw !important;
+                height: 100vh !important;
             }
             video {
                 display: none;
@@ -30,9 +32,8 @@
         </style>
     </head>
     <body>
-        <h2>Pixel FaceMesh Demo (Face Mesh + p5.js)</h2>
         <div id="p5-container"></div>
-        <button id="start-btn">Start Pixel Face</button>
+        <button id="start-btn">Start</button>
         <script type="module" src="/main.js"></script>
     </body>
 </html>
