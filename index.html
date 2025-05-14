@@ -4,6 +4,16 @@
         <meta charset="UTF-8" />
         <title>Kineitc FaceMesh Demo</title>
         <style>
+            @font-face {
+                font-family: 'Noka';
+                src: url('/kinetic-blocky-face/Noka-Bold.ttf') format('truetype');
+                font-weight: normal;
+                font-style: normal;
+            }
+            * {
+                font-family: 'Noka', Arial, sans-serif;
+                color: #8b4513;
+            }
             body,
             html {
                 margin: 0;
@@ -13,7 +23,9 @@
                 overflow: hidden;
             }
             #p5-container {
-                display: inline-block;
+                display: block;
+                position: fixed;
+                top: 0;
             }
             canvas {
                 background: #fff8e7;
@@ -27,12 +39,28 @@
             button {
                 display: block;
                 margin: auto;
+                position: absolute;
                 font-size: 10rem;
+                transform: translate(-50%, -50%);
+                top: 50svh;
+                left: 50vw;
+                border: solid 6px #8b4513;
+                background-color: #90ee90;
+                padding: 0 2rem;
+                padding-bottom: 0.3rem;
+                border-radius: 3rem;
+            }
+            h1 {
+                font-size: 1rem;
+                position: fixed;
+                z-index: 10;
+                width: 100%;
             }
         </style>
-      <script type="module" crossorigin src="/kinetic-blocky-face/assets/index-DGvFbqYq.js"></script>
+      <script type="module" crossorigin src="/kinetic-blocky-face/assets/index-CE7Rh1bh.js"></script>
     </head>
     <body>
+        <h1>SINGAPORE DESIGN WEEK 2025</h1>
         <div id="p5-container"></div>
         <button id="start-btn">Start</button>
     </body>
