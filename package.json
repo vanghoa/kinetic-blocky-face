@@ -15,9 +15,12 @@
         "vite-plugin-mkcert": "^1.17.8"
     },
     "dependencies": {
+        "@tensorflow-models/body-segmentation": "^1.0.2",
         "@tensorflow-models/face-landmarks-detection": "^1.0.6",
         "@tensorflow/tfjs-backend-webgl": "^4.22.0",
+        "@tensorflow/tfjs-core": "^4.22.0",
+        "@vladmandic/face-api": "^1.7.15",
         "face-api.js": "^0.22.2",
-        "p5": "^2.0.1"
+        "p5": "^2.0.2"
     }
 }

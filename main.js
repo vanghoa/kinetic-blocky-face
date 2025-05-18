@@ -1,50 +1,60 @@
 import p5 from 'p5';
-import * as faceapi from 'face-api.js';
+import '@tensorflow/tfjs-backend-webgl';
+import * as faceapi from '@vladmandic/face-api';
+import * as bodySegmentation from '@tensorflow-models/body-segmentation';
 
-// block size ratio 10:20
-const RECT_W = 40;
-const RECT_H = 20;
+const RECT_W = 20,
+    RECT_H = 10,
+    DO_FLIP = true;
 
-// outline color (same for all features)
+let segmenter,
+    detections = null,
+    lastMaskData = null,
+    lastMaskShape = null,
+    lastBBox = null;
+let lEyesHull, rEyesHull, noseHull, mouthHull;
+let videoReady = false,
+    video,
+    pg;
+let maskUpdateNeeded = false,
+    landmarkUpdateNeeded = false;
 
-// distinct fills per feature
 function randomSaturatedColor() {
-    // H: 0-360, S: 60-100%, L: 40-60%
     const h = Math.floor(Math.random() * 360);
-    const s = 70 + Math.floor(Math.random() * 31); // 70-100%
-    const l = 45 + Math.floor(Math.random() * 16); // 45-60%
-    return `hsl(${h},${s}%,${l}%)`;
+    const s = 70 + Math.floor(Math.random() * 31);
+    const l = 45 + Math.floor(Math.random() * 16);
+    function hslToRgb(h, s, l) {
+        s /= 100;
+        l /= 100;
+        const c = (1 - Math.abs(2 * l - 1)) * s;
+        const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+        const m = l - c / 2;
+        let [r1, g1, b1] = [0, 0, 0];
+        if (h < 60) [r1, g1, b1] = [c, x, 0];
+        else if (h < 120) [r1, g1, b1] = [x, c, 0];
+        else if (h < 180) [r1, g1, b1] = [0, c, x];
+        else if (h < 240) [r1, g1, b1] = [0, x, c];
+        else if (h < 300) [r1, g1, b1] = [x, 0, c];
+        else [r1, g1, b1] = [c, 0, x];
+        return [
+            Math.round((r1 + m) * 255),
+            Math.round((g1 + m) * 255),
+            Math.round((b1 + m) * 255),
+        ];
+    }
+    return hslToRgb(h, s, l);
 }
-
 const MOUTH_FILL = randomSaturatedColor();
 const EYE_FILL = randomSaturatedColor();
 const NOSE_FILL = randomSaturatedColor();
 const OUTLINE_COLOR = randomSaturatedColor();
 
-// how much of the canvas the face box should fill (0–1)
-const BOX_FILL = 1;
-
-// load models from /models
 async function loadModels() {
-    //await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
     await faceapi.loadTinyFaceDetectorModel('/kinetic-blocky-face/models');
     await faceapi.loadFaceLandmarkTinyModel('/kinetic-blocky-face/models');
     console.log('Models loaded');
 }
 
-// quantize points into grid cells
-function quantizePoints(pts) {
-    const cells = new Set();
-    pts.forEach(({ x, y }) => {
-        const col = Math.floor(x / RECT_W);
-        const row = Math.floor(y / RECT_H);
-        cells.add(`${col},${row}`);
-    });
-    return cells;
-}
-
-// draw a set of grid cells with a given fill
-// Utility: Convex hull using Graham scan
 function convexHull(points) {
     if (points.length < 3) return points.slice();
     points = points.slice().sort(([ax, ay], [bx, by]) => ax - bx || ay - by);
@@ -74,7 +84,6 @@ function convexHull(points) {
     return lower.concat(upper);
 }
 
-// Utility: Point-in-polygon (ray casting)
 function pointInPolygon(x, y, polygon) {
     let inside = false;
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -90,151 +99,177 @@ function pointInPolygon(x, y, polygon) {
     return inside;
 }
 
-// Draw a filled convex hull of grid cells
-function drawCells(p, cells, fillColor) {
-    if (!cells.size) return;
-    p.stroke(OUTLINE_COLOR);
-    p.strokeWeight(5);
-    p.fill(fillColor);
-
-    // Convert cell keys to [col, row]
-    const cellCoords = Array.from(cells, (key) => key.split(',').map(Number));
-    const hull = convexHull(cellCoords);
-
-    // For fast lookup
-    const cellSet = new Set(Array.from(cells));
-
-    // Helper: is cell on hull outline?
-    function isOnOutline(col, row) {
-        // If cell is not inside hull, skip
-        if (!pointInPolygon(col, row, hull)) return false;
-        // If any 4-neighbor is outside hull, it's on outline
-        const neighbors = [
-            [col + 1, row],
-            [col - 1, row],
-            [col, row + 1],
-            [col, row - 1],
-        ];
-        for (const [nc, nr] of neighbors) {
-            if (!pointInPolygon(nc, nr, hull)) return true;
-        }
-        return false;
+function updateHulls(detections, maskShape) {
+    if (!detections?.landmarks || !maskShape) return;
+    const { w: mw, h: mh } = maskShape;
+    const vidW = video.elt.videoWidth,
+        vidH = video.elt.videoHeight;
+    const scaleX = mw / vidW,
+        scaleY = mh / vidH;
+    function project(pt) {
+        return [pt.x * scaleX, pt.y * scaleY];
     }
-
-    // Bounding box
-    let minCol = Infinity,
-        maxCol = -Infinity,
-        minRow = Infinity,
-        maxRow = -Infinity;
-    for (const [col, row] of cellCoords) {
-        if (col < minCol) minCol = col;
-        if (col > maxCol) maxCol = col;
-        if (row < minRow) minRow = row;
-        if (row > maxRow) maxRow = row;
-    }
-
-    // Only fill cells on the outline of the hull
-    for (let col = minCol; col <= maxCol; col++) {
-        for (let row = minRow; row <= maxRow; row++) {
-            if (isOnOutline(col, row)) {
-                const x = col * RECT_W - p.width / 2 + RECT_W / 2;
-                const y = row * RECT_H - p.height / 2 + RECT_H / 2;
-                p.push();
-                p.translate(x, y, 0);
-                p.box(RECT_W, RECT_H, 100);
-                p.pop();
-            }
-        }
-    }
+    rEyesHull = convexHull(detections.landmarks.getRightEye().map(project));
+    lEyesHull = convexHull(detections.landmarks.getLeftEye().map(project));
+    noseHull = convexHull(detections.landmarks.getNose().map(project));
+    mouthHull = convexHull(detections.landmarks.getMouth().map(project));
 }
 
+// ─── p5 Sketch ────────────────────────────────────────────────────
 const sketch = (p) => {
-    let video;
-    let detections = null;
     const detectorOpts = new faceapi.TinyFaceDetectorOptions({
         inputSize: 160,
         scoreThreshold: 0.5,
     });
 
     p.setup = async () => {
-        // Set canvas size to fit viewport ratio, but max 800x600
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        let w = 1000,
-            h = 1000;
-        const ratio = vw / vh;
-        if (w / h > ratio) {
-            w = Math.round(h * ratio);
-        } else {
-            h = Math.round(w / ratio);
-        }
-        // Use WEBGL mode for 3D
+        const vw = window.innerWidth,
+            vh = window.innerHeight;
+        let w = 700,
+            h = 700,
+            ratio = vw / vh;
+        if (w / h > ratio) w = Math.round(h * ratio);
+        else h = Math.round(w / ratio);
         p.createCanvas(w, h, p.WEBGL).parent('p5-container');
-        video = p.createCapture(p.VIDEO);
-        video.size(w, h);
+        video = p.createCapture(
+            { video: { width: w, height: h }, audio: false },
+            () => (videoReady = true)
+        );
         video.hide();
-        await loadModels();
-        requestAnimationFrame(detectLoop);
+        pg = p.createGraphics(w, h);
+        pg.pixelDensity(1);
+        // Start segmentation and landmark loops
+        segmentationLoop();
+        landmarkLoop(detectorOpts);
     };
 
-    p.draw = () => {
-        p.background('#fff8e7');
-        if (!detections?.detection) return;
+    const THROTTLE = 200; // ms
 
-        // get face box and compute zoom
-        const box = detections.detection.box;
-        const cx = box.x + box.width / 2;
-        const cy = box.y + box.height / 2;
-        const scale = Math.max(
-            (p.width * BOX_FILL) / box.width,
-            (p.height * BOX_FILL) / box.height
-        );
-
-        // transform each landmark
-        const transform = ({ x, y }) => ({
-            x: (x - cx) * scale + p.width / 2,
-            y: (y - cy) * scale + p.height / 2,
-        });
-
-        // quantize each feature
-        const mouthCells = quantizePoints(
-            detections.landmarks.getMouth().map(transform)
-        );
-        const leftEyeCells = quantizePoints(
-            detections.landmarks.getLeftEye().map(transform)
-        );
-        const rightEyeCells = quantizePoints(
-            detections.landmarks.getRightEye().map(transform)
-        );
-        const noseCells = quantizePoints(
-            detections.landmarks.getNose().map(transform)
-        );
-
-        // Optionally, rotate scene for better 3D effect
-        p.orbitControl();
-
-        // draw each with its fill
-        drawCells(p, mouthCells, MOUTH_FILL);
-        drawCells(p, leftEyeCells, EYE_FILL);
-        drawCells(p, rightEyeCells, EYE_FILL);
-        drawCells(p, noseCells, NOSE_FILL);
-    };
-
-    // detection loop, throttled to ~10 FPS
-    let lastTime = 0;
-    const INTERVAL = 50;
-    async function detectLoop(ts) {
-        if (video.elt.readyState >= 2 && ts - lastTime > INTERVAL) {
-            lastTime = ts;
-            try {
-                detections = await faceapi
-                    .detectSingleFace(video.elt, detectorOpts)
-                    .withFaceLandmarks(true);
-            } catch (err) {
-                console.error(err);
+    p.draw = (() => {
+        let lastDraw = 0;
+        return () => {
+            const now = Date.now();
+            if (
+                !videoReady ||
+                !segmenter ||
+                !lastMaskData ||
+                !lastMaskShape ||
+                !lastBBox ||
+                now - lastDraw < THROTTLE
+            )
+                return;
+            lastDraw = now;
+            // Only update hulls if new detections or mask shape
+            if (landmarkUpdateNeeded || maskUpdateNeeded) {
+                updateHulls(detections, lastMaskShape);
+                landmarkUpdateNeeded = false;
+                maskUpdateNeeded = false;
             }
+            pg.image(video, 0, 0, pg.width, pg.height);
+            pg.loadPixels();
+            const buf = pg.pixels,
+                bufW = pg.width;
+            const { w, h, c } = lastMaskShape;
+            const { minX: X0, minY: Y0, cropW, cropH } = lastBBox;
+            p.background(255);
+            p.stroke(OUTLINE_COLOR);
+            p.strokeWeight(1);
+            for (let yy = 0; yy < cropH; yy += RECT_H) {
+                for (let xx = 0; xx < cropW; xx += RECT_W) {
+                    const rawX = X0 + xx + RECT_W / 2;
+                    const xVid = DO_FLIP ? w - 1 - rawX : rawX;
+                    const yVid = Y0 + yy + RECT_H / 2;
+                    const maskIdx = (yVid * w + xVid) * c;
+                    if (lastMaskData[maskIdx] > 0.5) {
+                        const vidIdx = (yVid * bufW + xVid) * 4;
+                        let r = buf[vidIdx],
+                            g = buf[vidIdx + 1],
+                            b = buf[vidIdx + 2];
+                        if (rEyesHull && pointInPolygon(xVid, yVid, rEyesHull))
+                            [r, g, b] = EYE_FILL;
+                        else if (
+                            lEyesHull &&
+                            pointInPolygon(xVid, yVid, lEyesHull)
+                        )
+                            [r, g, b] = EYE_FILL;
+                        else if (
+                            noseHull &&
+                            pointInPolygon(xVid, yVid, noseHull)
+                        )
+                            [r, g, b] = NOSE_FILL;
+                        else if (
+                            mouthHull &&
+                            pointInPolygon(xVid, yVid, mouthHull)
+                        )
+                            [r, g, b] = MOUTH_FILL;
+                        p.push();
+                        p.fill(r, g, b);
+                        p.translate(
+                            xx - cropW / 2 + RECT_W / 2,
+                            yy - cropH / 2 + RECT_H / 2,
+                            0
+                        );
+                        p.box(RECT_W, RECT_H, 100);
+                        p.pop();
+                    }
+                }
+            }
+        };
+    })();
+
+    // Use the same THROTTLE for segmentation and landmark loops
+    function segmentationLoop() {
+        if (videoReady && segmenter) {
+            segmenter.segmentPeople(video.elt).then(([seg]) => {
+                let maskTensor = seg.mask.toTensor
+                    ? seg.mask.toTensor()
+                    : seg.mask;
+                Promise.resolve(maskTensor).then(async (tensor) => {
+                    const maskData = await tensor.data();
+                    const [mh, mw, mc] = tensor.shape;
+                    let minX = mw,
+                        minY = mh,
+                        maxX = 0,
+                        maxY = 0;
+                    for (let i = 0; i < maskData.length; i += mc) {
+                        if (maskData[i] > 0.5) {
+                            const idx = i / mc;
+                            const y = Math.floor(idx / mw),
+                                x = idx % mw;
+                            minX = Math.min(minX, x);
+                            minY = Math.min(minY, y);
+                            maxX = Math.max(maxX, x);
+                            maxY = Math.max(maxY, y);
+                        }
+                    }
+                    lastMaskData = maskData;
+                    lastMaskShape = { w: mw, h: mh, c: mc };
+                    lastBBox = {
+                        minX,
+                        minY,
+                        cropW: maxX - minX,
+                        cropH: maxY - minY,
+                    };
+                    tensor.dispose && tensor.dispose();
+                    maskUpdateNeeded = true;
+                });
+            });
         }
-        requestAnimationFrame(detectLoop);
+        setTimeout(segmentationLoop, THROTTLE);
+    }
+
+    function landmarkLoop(detectorOpts) {
+        if (videoReady) {
+            faceapi
+                .detectSingleFace(video.elt, detectorOpts)
+                .withFaceLandmarks(true)
+                .then((res) => {
+                    detections = res;
+                    landmarkUpdateNeeded = true;
+                })
+                .catch(() => {});
+        }
+        setTimeout(() => landmarkLoop(detectorOpts), THROTTLE);
     }
 };
 
@@ -242,15 +277,17 @@ document.getElementById('start-btn').addEventListener('click', async () => {
     const btn = document.getElementById('start-btn');
     btn.disabled = true;
     btn.textContent = 'LOADING...';
-
-    // 1. Load TF backend if needed (face-api will auto-load tfjs)
-    // 2. Load models
     await loadModels();
-
-    // 3. Hide button, show canvas container
+    segmenter = await bodySegmentation.createSegmenter(
+        bodySegmentation.SupportedModels.MediaPipeSelfieSegmentation,
+        {
+            runtime: 'mediapipe',
+            solutionPath:
+                'https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation',
+            modelType: 'general',
+        }
+    );
     btn.style.display = 'none';
     document.getElementById('p5-container').style.display = 'block';
-
-    // 4. Start p5 sketch (getUserMedia now inside gesture)
     new p5(sketch);
 });
