@@ -182,7 +182,12 @@ const sketch = (p) => {
         p.pixelDensity(1);
         p.createCanvas(w, h, p.WEBGL).parent('p5-container');
         video = p.createCapture(
-            { video: { width: ogw, height: ogh }, audio: false },
+            {
+                video: {
+                    mandatory: { width: ogw, height: ogh },
+                },
+                audio: false,
+            },
             () => (videoReady = true)
         );
         video.hide();
