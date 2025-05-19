@@ -3,6 +3,62 @@ import '@tensorflow/tfjs-backend-webgl';
 import * as faceapi from '@vladmandic/face-api';
 import * as bodySegmentation from '@tensorflow-models/body-segmentation';
 
+// polyfilling
+if (typeof window.OffscreenCanvas === 'undefined') {
+    window.OffscreenCanvas = function (width, height) {
+        const c = document.createElement('canvas');
+        c.width = width;
+        c.height = height;
+        return c;
+    };
+}
+
+const HEX_PALETTE = ['000000', 'FFFFFF', 'FCCBB4', 'F1A582', 'E0885F'];
+
+const HEX_PALETTE_LANDMARK = [
+    '2152FF',
+    'FFE35B',
+    'C351F4',
+    '81D282',
+    '5C9EFF',
+    '9C0DDF',
+    'CAAEFF',
+    '9C5035',
+];
+
+// 2) helper to parse 3- or 6-digit hex into [r,g,b]
+function hexToRgb(hex) {
+    // strip leading “#”
+    let h = hex.replace(/^#/, '');
+    // expand short form “#0f8” → “00ff88”
+    if (h.length === 3) {
+        h = h
+            .split('')
+            .map((c) => c + c)
+            .join('');
+    }
+    const intVal = parseInt(h, 16);
+    return [(intVal >> 16) & 0xff, (intVal >> 8) & 0xff, intVal & 0xff];
+}
+function nearestColor(r, g, b) {
+    let best = PALETTE[0];
+    let bestDist = Infinity;
+    for (const [pr, pg, pb] of PALETTE) {
+        const dr = r - pr;
+        const dg = g - pg;
+        const db = b - pb;
+        const d2 = dr * dr + dg * dg + db * db;
+        if (d2 < bestDist) {
+            bestDist = d2;
+            best = [pr, pg, pb];
+        }
+    }
+    return best;
+}
+// 3) build your numeric palette
+const PALETTE = HEX_PALETTE.map(hexToRgb);
+const PALETTE_LANDMARK = HEX_PALETTE_LANDMARK.map(hexToRgb);
+
 const RECT_W = 20,
     RECT_H = 10,
     DO_FLIP = true;
@@ -18,36 +74,26 @@ let videoReady = false,
     pg;
 let maskUpdateNeeded = false,
     landmarkUpdateNeeded = false;
+let samplingCanvas, samplingCtx;
 
-function randomSaturatedColor() {
-    const h = Math.floor(Math.random() * 360);
-    const s = 70 + Math.floor(Math.random() * 31);
-    const l = 45 + Math.floor(Math.random() * 16);
-    function hslToRgb(h, s, l) {
-        s /= 100;
-        l /= 100;
-        const c = (1 - Math.abs(2 * l - 1)) * s;
-        const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-        const m = l - c / 2;
-        let [r1, g1, b1] = [0, 0, 0];
-        if (h < 60) [r1, g1, b1] = [c, x, 0];
-        else if (h < 120) [r1, g1, b1] = [x, c, 0];
-        else if (h < 180) [r1, g1, b1] = [0, c, x];
-        else if (h < 240) [r1, g1, b1] = [0, x, c];
-        else if (h < 300) [r1, g1, b1] = [x, 0, c];
-        else [r1, g1, b1] = [c, 0, x];
-        return [
-            Math.round((r1 + m) * 255),
-            Math.round((g1 + m) * 255),
-            Math.round((b1 + m) * 255),
-        ];
-    }
-    return hslToRgb(h, s, l);
+function getRandomPaletteColor(palette, used = new Set()) {
+    let idx, color;
+    do {
+        idx = Math.floor(Math.random() * palette.length);
+        color = palette[idx];
+    } while (used.has(idx) && used.size < palette.length);
+    used.add(idx);
+    return color;
 }
-const MOUTH_FILL = randomSaturatedColor();
-const EYE_FILL = randomSaturatedColor();
-const NOSE_FILL = randomSaturatedColor();
-const OUTLINE_COLOR = randomSaturatedColor();
+const usedColors = new Set();
+const MOUTH_FILL = getRandomPaletteColor(PALETTE_LANDMARK, usedColors);
+const EYE_FILL = getRandomPaletteColor(PALETTE_LANDMARK, usedColors);
+const NOSE_FILL = getRandomPaletteColor(PALETTE_LANDMARK, usedColors);
+const OUTLINE_COLOR = getRandomPaletteColor(PALETTE_LANDMARK, usedColors);
+const OUTLINE_COLOR_LANDMARK = getRandomPaletteColor(
+    PALETTE_LANDMARK,
+    usedColors
+);
 
 async function loadModels() {
     await faceapi.loadTinyFaceDetectorModel('/kinetic-blocky-face/models');
@@ -125,52 +171,105 @@ const sketch = (p) => {
     p.setup = async () => {
         const vw = window.innerWidth,
             vh = window.innerHeight;
-        let w = 700,
-            h = 700,
+        let ogw = 700,
+            ogh = 800;
+        let w = ogw,
+            h = ogh,
             ratio = vw / vh;
         if (w / h > ratio) w = Math.round(h * ratio);
         else h = Math.round(w / ratio);
+        //console.log(w, h);
+        p.pixelDensity(1);
         p.createCanvas(w, h, p.WEBGL).parent('p5-container');
         video = p.createCapture(
-            { video: { width: w, height: h }, audio: false },
+            { video: { width: ogw, height: ogh }, audio: false },
             () => (videoReady = true)
         );
         video.hide();
-        pg = p.createGraphics(w, h);
+
+        samplingCanvas = document.createElement('canvas');
+        samplingCanvas.width = ogw;
+        samplingCanvas.height = ogh;
+        samplingCtx = samplingCanvas.getContext('2d');
+        pg = p.createGraphics(ogw, ogh);
         pg.pixelDensity(1);
         // Start segmentation and landmark loops
         segmentationLoop();
         landmarkLoop(detectorOpts);
     };
 
-    const THROTTLE = 200; // ms
+    const THROTTLE = 400; // ms
+    let init = true;
 
     p.draw = (() => {
         let lastDraw = 0;
+        let buf = null;
+        let bufW = 20;
         return () => {
             const now = Date.now();
+            const vw = video.elt.videoWidth;
+            const vh = video.elt.videoHeight;
+            if (now - lastDraw >= THROTTLE && vw) {
+                // paint the current video frame into your 2D canvas
+                if (
+                    samplingCanvas.width !== vw ||
+                    samplingCanvas.height !== vh
+                ) {
+                    samplingCanvas.width = vw;
+                    samplingCanvas.height = vh;
+                }
+                samplingCtx.drawImage(video.elt, 0, 0, vw, vh);
+                const imageData = samplingCtx.getImageData(0, 0, vw, vh);
+                buf = imageData.data; // Uint8ClampedArray of RGBA
+                bufW = vw;
+                lastDraw = now;
+            }
             if (
                 !videoReady ||
                 !segmenter ||
                 !lastMaskData ||
                 !lastMaskShape ||
                 !lastBBox ||
-                now - lastDraw < THROTTLE
+                !buf ||
+                !bufW
             )
                 return;
-            lastDraw = now;
+            p.orbitControl();
             // Only update hulls if new detections or mask shape
             if (landmarkUpdateNeeded || maskUpdateNeeded) {
                 updateHulls(detections, lastMaskShape);
                 landmarkUpdateNeeded = false;
                 maskUpdateNeeded = false;
             }
-            pg.image(video, 0, 0, pg.width, pg.height);
-            pg.loadPixels();
-            const buf = pg.pixels,
-                bufW = pg.width;
+            //pg.image(video, 0, 0, pg.width, pg.height);
             const { w, h, c } = lastMaskShape;
             const { minX: X0, minY: Y0, cropW, cropH } = lastBBox;
+            // Only zoom out at the start, then let orbitControl take over
+            if (init) {
+                init = false;
+                // Randomly position camera on a sphere of radius 2000, horizontally from -1500 to 1500, vertically from -1000 to 1000, always looking at the center
+                const isMobile = window.innerWidth < window.innerHeight;
+                const radius = isMobile ? 1000 : 2000;
+                // Limit rotation: camX and camY are proportional to radius, with lower rotation on mobile
+                const limit = isMobile ? 0.4 : 0.75;
+                const camX = (Math.random() * (2 * limit) - limit) * radius;
+                const camY = (Math.random() * (2 * limit) - limit) * radius;
+                // Only allow camZ to be positive (front side)
+                const camZ = Math.sqrt(
+                    Math.max(0, radius * radius - camX * camX - camY * camY)
+                );
+                p.camera(
+                    camX,
+                    camY,
+                    camZ,
+                    0, // look at center
+                    0,
+                    0,
+                    0,
+                    1,
+                    0
+                );
+            }
             p.background(255);
             p.stroke(OUTLINE_COLOR);
             p.strokeWeight(1);
@@ -182,28 +281,43 @@ const sketch = (p) => {
                     const maskIdx = (yVid * w + xVid) * c;
                     if (lastMaskData[maskIdx] > 0.5) {
                         const vidIdx = (yVid * bufW + xVid) * 4;
+                        let isLandmark = false;
                         let r = buf[vidIdx],
                             g = buf[vidIdx + 1],
                             b = buf[vidIdx + 2];
-                        if (rEyesHull && pointInPolygon(xVid, yVid, rEyesHull))
+                        if (
+                            rEyesHull &&
+                            pointInPolygon(xVid, yVid, rEyesHull)
+                        ) {
+                            isLandmark = true;
                             [r, g, b] = EYE_FILL;
-                        else if (
+                        } else if (
                             lEyesHull &&
                             pointInPolygon(xVid, yVid, lEyesHull)
-                        )
+                        ) {
+                            isLandmark = true;
                             [r, g, b] = EYE_FILL;
-                        else if (
+                        } else if (
                             noseHull &&
                             pointInPolygon(xVid, yVid, noseHull)
-                        )
+                        ) {
+                            isLandmark = true;
                             [r, g, b] = NOSE_FILL;
-                        else if (
+                        } else if (
                             mouthHull &&
                             pointInPolygon(xVid, yVid, mouthHull)
-                        )
+                        ) {
+                            isLandmark = true;
                             [r, g, b] = MOUTH_FILL;
+                        } else {
+                            [r, g, b] = nearestColor(r, g, b);
+                        }
                         p.push();
                         p.fill(r, g, b);
+                        if (isLandmark) {
+                            p.stroke(OUTLINE_COLOR_LANDMARK);
+                            p.strokeWeight(2);
+                        }
                         p.translate(
                             xx - cropW / 2 + RECT_W / 2,
                             yy - cropH / 2 + RECT_H / 2,
